@@ -52,7 +52,7 @@ This script will train the agent for a specified number of timesteps and periodi
 
 After training, the script will save the trained agent as snake_ppo.zip.
 
-## Watch the agent play
+### Watch the agent play
 
 To watch the trained agent play the Snake game, run the test_agent.py script:
 ```
