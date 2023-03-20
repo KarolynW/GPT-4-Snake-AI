@@ -3,5 +3,3 @@ numpy
 pygame
 stable-baselines3
 matplotlib
-
-
