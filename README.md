@@ -9,6 +9,11 @@ The project uses the following key components:
 * train_agent.py: This script trains a Snake-playing agent using the PPO reinforcement learning algorithm from the Stable Baselines3 library.
 * test_agent.py: This script allows you to watch the trained agent play the Snake game and records its performance in a CSV file.
 
+## Requirements
+
+- Python 3.7
+You MUST use this version of python due to some of the packages.
+
 ## Installation
 
 Clone the repository:
