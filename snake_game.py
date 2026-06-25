@@ -1,60 +1,131 @@
-import pygame
-import random
+"""
+Core Snake game logic — no rendering, no gym dependencies.
 
-# Initialize Pygame
-pygame.init()
+Grid coordinates: (col, row) with (0,0) at top-left.
+Direction integers: 0=RIGHT 1=DOWN 2=LEFT 3=UP
+Action integers:   0=straight 1=turn-right 2=turn-left (relative to current direction)
+"""
 
-# Game settings
-WIDTH, HEIGHT = 640, 480
-GRID_SIZE = 20
-GRID_WIDTH, GRID_HEIGHT = WIDTH // GRID_SIZE, HEIGHT // GRID_SIZE
+import numpy as np
 
-# Colors
-WHITE = (255, 255, 255)
-GREEN = (0, 255, 0)
-RED = (255, 0, 0)
-BLACK = (0, 0, 0)
+GRID_W = 20
+GRID_H = 20
 
-# Snake class
-class Snake:
-    def __init__(self):
-        self.body = [(GRID_WIDTH // 2, GRID_HEIGHT // 2)]
-        self.direction = (0, -1)
+# (dx, dy) for directions 0..3
+_DX = [1, 0, -1, 0]
+_DY = [0, 1, 0, -1]
 
-    def move(self):
-        head_x, head_y = self.body[0]
-        dir_x, dir_y = self.direction
-        new_head = (head_x + dir_x, head_y + dir_y)
-        self.body.insert(0, new_head)
-        self.body.pop()
 
-    def grow(self):
-        self.body.append(self.body[-1])
+class SnakeGame:
+    def __init__(self, seed: int | None = None):
+        self._rng = np.random.default_rng(seed)
+        self.reset()
 
-    def change_direction(self, new_direction):
-        self.direction = new_direction
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-    def collides_with_itself(self):
-        return self.body[0] in self.body[1:]
+    def reset(self):
+        cx, cy = GRID_W // 2, GRID_H // 2
+        self.direction = 0  # start going RIGHT
+        self.snake: list[tuple[int, int]] = [(cx, cy), (cx - 1, cy), (cx - 2, cy)]
+        self.score = 0
+        self.steps = 0
+        self.steps_since_food = 0
+        self._snake_set: set[tuple[int, int]] = set(self.snake)
+        self._place_food()
 
-    def collides_with_bounds(self):
-        head_x, head_y = self.body[0]
-        return head_x < 0 or head_y < 0 or head_x >= GRID_WIDTH or head_y >= GRID_HEIGHT
+    def step(self, action: int) -> tuple[float, bool]:
+        """
+        Apply a relative action (0=straight, 1=right, 2=left).
+        Returns (reward, done).
+        """
+        if action == 1:
+            self.direction = (self.direction + 1) % 4
+        elif action == 2:
+            self.direction = (self.direction - 1) % 4
 
-# Food class
-class Food:
-    def __init__(self, snake_body):
-        self.position = self.generate_new_position(snake_body)
+        self.steps += 1
+        self.steps_since_food += 1
 
-    def generate_new_position(self, snake_body):
-        while True:
-            x = random.randint(0, GRID_WIDTH - 1)
-            y = random.randint(0, GRID_HEIGHT - 1)
-            if (x, y) not in snake_body:
-                return x, y
+        head = self.snake[0]
+        new_head = (head[0] + _DX[self.direction], head[1] + _DY[self.direction])
 
-def draw_text(text, font, color, surface, x, y):
-    text_obj = font.render(text, 1, color)
-    text_rect = text_obj.get_rect()
-    text_rect.topleft = (x, y)
-    surface.blit(text_obj, text_rect)
+        # Wall collision
+        if not (0 <= new_head[0] < GRID_W and 0 <= new_head[1] < GRID_H):
+            return -10.0, True
+
+        # Self collision — exclude tail since it will vacate this step
+        if new_head in self._snake_set and new_head != self.snake[-1]:
+            return -10.0, True
+
+        # Move snake
+        tail = self.snake.pop()
+        self._snake_set.discard(tail)
+        self.snake.insert(0, new_head)
+        self._snake_set.add(new_head)
+
+        if new_head == self.food:
+            self.score += 1
+            self.steps_since_food = 0
+            # Regrow by re-appending the tail
+            self.snake.append(tail)
+            self._snake_set.add(tail)
+            self._place_food()
+            return 10.0, False
+
+        # Timeout: prevent the snake from looping forever
+        timeout = GRID_W * GRID_H * (1 + self.score)
+        if self.steps_since_food >= timeout:
+            return -10.0, True
+
+        # Small distance-based shaping
+        prev_dist = abs(head[0] - self.food[0]) + abs(head[1] - self.food[1])
+        curr_dist = abs(new_head[0] - self.food[0]) + abs(new_head[1] - self.food[1])
+        return (0.1 if curr_dist < prev_dist else -0.1), False
+
+    def get_state(self) -> np.ndarray:
+        """Return the 11-feature binary state vector."""
+        head = self.snake[0]
+        d = self.direction
+
+        # Relative danger checks
+        def _danger(dd: int) -> float:
+            nx = head[0] + _DX[dd]
+            ny = head[1] + _DY[dd]
+            if not (0 <= nx < GRID_W and 0 <= ny < GRID_H):
+                return 1.0
+            # Exclude tail for the same reason as in step()
+            body_no_tail = self._snake_set - {self.snake[-1]}
+            return 1.0 if (nx, ny) in body_no_tail else 0.0
+
+        danger_s = _danger(d)
+        danger_r = _danger((d + 1) % 4)
+        danger_l = _danger((d - 1) % 4)
+
+        fx, fy = self.food
+        hx, hy = head
+        return np.array([
+            danger_s, danger_r, danger_l,
+            float(d == 0), float(d == 1), float(d == 2), float(d == 3),  # direction one-hot
+            float(fx < hx), float(fx > hx),  # food left / right
+            float(fy < hy), float(fy > hy),  # food up  / down
+        ], dtype=np.float32)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _place_food(self):
+        candidates = [
+            (x, y)
+            for x in range(GRID_W)
+            for y in range(GRID_H)
+            if (x, y) not in self._snake_set
+        ]
+        if not candidates:
+            # Board full — snake wins; treat as done at env level
+            self.food = (-1, -1)
+            return
+        idx = int(self._rng.integers(len(candidates)))
+        self.food = candidates[idx]
