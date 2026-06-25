@@ -1,98 +1,128 @@
-import gym
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
-from snake_env import SnakeEnv
+"""
+Train a Snake AI using PPO (Proximal Policy Optimization).
+
+Key design choices:
+- 11-feature compact state: danger×3, direction×4, food×4
+- Relative 3-action space (straight/right/left) — no invalid reversal possible
+- 8 parallel environments for throughput
+- Distance shaping + timeout penalty for robust reward signal
+- 2 million timesteps — sufficient for strong play on a 20×20 grid
+
+Usage:
+    python train_agent.py
+    python train_agent.py --timesteps 5000000  # longer for peak performance
+"""
+
+import argparse
+import os
+
 import numpy as np
-import pygame
-import matplotlib.pyplot as plt
-
-print("Starting train_agent.py")
-
-mean_rewards_history = []
-
-# Turn on interactive mode
-plt.ion()
-
-# Create an initial plot
-fig, ax = plt.subplots()
-ax.set_xlabel('Evaluation point')
-ax.set_ylabel('Mean reward')
-ax.set_title('Mean reward at each evaluation point')
-
-def evaluate_and_render(model, env, n_episodes=10):
-    mean_rewards = []
-    for _ in range(n_episodes):
-        obs = env.reset()
-        done = False
-        episode_reward = 0
-        while not done:
-            action, _ = model.predict(obs)
-            obs, reward, done, _ = env.step(action)
-            env.render()
-            episode_reward += reward
-        mean_rewards.append(episode_reward)
-    mean_reward = np.mean(mean_rewards)
-    std_reward = np.std(mean_rewards)
-    return mean_reward, std_reward
-
-# Create the training environment
-env = DummyVecEnv([lambda: SnakeEnv(render=False)])
-
-# Create the evaluation environment with a 100ms delay during rendering
-eval_env = SnakeEnv(render=True)
-
-# Hyperparameters
-learning_rate = 0.0005
-n_steps = 256
-gae_lambda = 0.95
-gamma = 0.99
-ent_coef = 0.01
-clip_range = 0.2
-n_epochs = 10
-batch_size = 64
-
-# Create the PPO model
-model = PPO(
-    "MlpPolicy",
-    env,
-    verbose=1,
-    learning_rate=learning_rate,
-    n_steps=n_steps,
-    gae_lambda=gae_lambda,
-    gamma=gamma,
-    ent_coef=ent_coef,
-    clip_range=clip_range,
-    n_epochs=n_epochs,
-    batch_size=batch_size,
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.callbacks import (
+    EvalCallback,
+    CheckpointCallback,
+    CallbackList,
 )
+from stable_baselines3.common.monitor import Monitor
 
-# Train the model
-total_timesteps = 100000
-log_interval = 10000
-for timestep in range(0, total_timesteps, log_interval):
-    print(f"Training for {log_interval} timesteps")
-    model.learn(total_timesteps=log_interval)
-    print("Evaluating model")
-    mean_reward, std_reward = evaluate_and_render(model, eval_env, n_episodes=10)
-    print(f"Timestep: {timestep}, Mean reward: {mean_reward} +/- {std_reward}")
+from snake_env import SnakeEnv
 
-    # Update the plot
-    mean_rewards_history.append(mean_reward)
-    ax.clear()
-    ax.plot(mean_rewards_history)
-    ax.set_xlabel('Evaluation point')
-    ax.set_ylabel('Mean reward')
-    ax.set_title('Mean reward at each evaluation point')
-    plt.pause(0.01)  # Add a small delay to allow the plot to update
 
-# Save the model
-model.save("snake_ppo")
+def make_env():
+    return Monitor(SnakeEnv())
 
-# Turn off interactive mode
-plt.ioff()
 
-# Evaluate the trained agent
-print("Evaluating final model")
-mean_reward, std_reward = evaluate_and_render(model, eval_env, n_episodes=10)
-print(f"Final Mean reward: {mean_reward} +/- {std_reward}")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--timesteps", type=int, default=2_000_000,
+                        help="Total training timesteps (default 2M)")
+    parser.add_argument("--n-envs", type=int, default=8,
+                        help="Number of parallel environments")
+    parser.add_argument("--out", type=str, default="snake_ppo_best",
+                        help="Output model name (no extension)")
+    args = parser.parse_args()
 
+    os.makedirs("logs", exist_ok=True)
+    os.makedirs("checkpoints", exist_ok=True)
+
+    # Vectorised training environments
+    train_env = make_vec_env(make_env, n_envs=args.n_envs)
+
+    # Separate eval environment (single, deterministic)
+    eval_env = Monitor(SnakeEnv())
+
+    # Save best model whenever eval improves
+    eval_cb = EvalCallback(
+        eval_env,
+        best_model_save_path=".",
+        log_path="logs",
+        eval_freq=max(50_000 // args.n_envs, 1),
+        n_eval_episodes=20,
+        deterministic=True,
+        verbose=1,
+    )
+
+    # Periodic checkpoint so training can be resumed
+    ckpt_cb = CheckpointCallback(
+        save_freq=max(200_000 // args.n_envs, 1),
+        save_path="checkpoints",
+        name_prefix="snake_ppo",
+        verbose=1,
+    )
+
+    model = PPO(
+        "MlpPolicy",
+        train_env,
+        verbose=1,
+        learning_rate=3e-4,
+        n_steps=1024,
+        batch_size=256,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.005,
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        policy_kwargs=dict(net_arch=[256, 256]),
+        tensorboard_log="logs/tb",
+    )
+
+    print(f"Training for {args.timesteps:,} timesteps across {args.n_envs} envs…")
+    model.learn(
+        total_timesteps=args.timesteps,
+        callback=CallbackList([eval_cb, ckpt_cb]),
+        progress_bar=True,
+    )
+
+    model.save(args.out)
+    print(f"\nTraining complete. Best model saved to best_model.zip")
+    print(f"Final model saved to {args.out}.zip")
+    print(f"Run `python test_agent.py` to watch it play.")
+
+    # Quick final evaluation
+    print("\nFinal evaluation (50 episodes)…")
+    scores = []
+    obs, _ = eval_env.reset()
+    ep_score = 0
+    for _ in range(50 * 1000):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = eval_env.step(action)
+        if "score" in info:
+            ep_score = info["score"]
+        if terminated or truncated:
+            scores.append(ep_score)
+            ep_score = 0
+            obs, _ = eval_env.reset()
+            if len(scores) >= 50:
+                break
+
+    if scores:
+        print(f"Mean score: {np.mean(scores):.1f}  "
+              f"Max: {max(scores)}  "
+              f"≥10: {sum(s >= 10 for s in scores)}/{len(scores)}")
+
+
+if __name__ == "__main__":
+    main()

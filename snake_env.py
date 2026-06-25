@@ -1,114 +1,125 @@
-import gym
-from gym import spaces
+"""
+Gymnasium environment wrapping SnakeGame.
+
+Observation: 11-dimensional binary float32 vector
+Actions:     Discrete(3) — 0=straight, 1=turn-right, 2=turn-left
+"""
+
+import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
 import pygame
-from snake_game import Snake, Food, GRID_WIDTH, GRID_HEIGHT, WIDTH, HEIGHT, GRID_SIZE, WHITE, GREEN, RED, BLACK, draw_text
+
+from snake_game import SnakeGame, GRID_W, GRID_H
+
+CELL = 28          # pixels per grid cell
+WIN_W = GRID_W * CELL
+WIN_H = GRID_H * CELL + 40  # extra bar for score
+
+_COLOR_BG    = (15,  15,  15)
+_COLOR_GRID  = (30,  30,  30)
+_COLOR_FOOD  = (220, 50,  50)
+_COLOR_HEAD  = (50,  200, 80)
+_COLOR_BODY  = (30,  140, 60)
+_COLOR_TEXT  = (220, 220, 220)
 
 
 class SnakeEnv(gym.Env):
-    def __init__(self, render=False, delay=0):
-        super(SnakeEnv, self).__init__()
-        self.action_space = spaces.Discrete(4)
-        self.observation_space = spaces.Box(low=0, high=1, shape=(GRID_HEIGHT, GRID_WIDTH, 4), dtype=np.float32)
-        self.snake = Snake()
-        self.food = Food(self.snake.body)
-        self.score = 0
-        self.delay = delay
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 15}
 
-        self.render_mode = render
-        if render:
-            self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-            pygame.display.set_caption("Snake AI")
-            self.clock = pygame.time.Clock()
-            self.font = pygame.font.Font(None, 36)
+    def __init__(self, render_mode: str | None = None):
+        super().__init__()
+        self.render_mode = render_mode
+        self.observation_space = spaces.Box(0.0, 1.0, shape=(11,), dtype=np.float32)
+        self.action_space = spaces.Discrete(3)
+        self.game = SnakeGame()
+        self._screen = None
+        self._clock = None
+        self._font = None
 
-    def step(self, action):
-        direction = [(-1, 0), (1, 0), (0, -1), (0, 1)][action]
-        if direction != (-self.snake.direction[0], -self.snake.direction[1]):
-            self.snake.change_direction(direction)
+    # ------------------------------------------------------------------
+    # Gymnasium API
+    # ------------------------------------------------------------------
 
-        self.snake.move()
-
-        reward = 0
-        done = False
-
-        if self.snake.collides_with_bounds() or self.snake.collides_with_itself():
-            done = True
-            reward = -1000  # Increase the negative reward for dying
-        elif self.snake.body[0] == self.food.position:
-            self.snake.grow()
-            self.food = Food(self.snake.body)
-            self.score += 1
-            reward = 500  # Increase the reward for eating food
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        if seed is not None:
+            self.game = SnakeGame(seed=seed)
         else:
-            reward = -1  # Increase the negative reward for every step without eating food
+            self.game.reset()
+        obs = self.game.get_state()
+        if self.render_mode == "human":
+            self._render_frame()
+        return obs, {}
 
+    def step(self, action: int):
+        reward, terminated = self.game.step(int(action))
+        truncated = False
+        obs = self.game.get_state()
+        info = {"score": self.game.score}
+        if self.render_mode == "human":
+            self._render_frame()
+        return obs, reward, terminated, truncated, info
 
-        observation = self._get_observation()
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return self._render_frame()
+        self._render_frame()
 
-        if self.render_mode:
-            self.render()
+    def close(self):
+        if self._screen is not None:
+            pygame.display.quit()
+            pygame.quit()
+            self._screen = None
 
-        return observation, reward, done, {}
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
 
-
-    def reset(self):
-        self.snake = Snake()
-        self.food = Food(self.snake.body)
-        self.score = 0
-        return self._get_observation()
-
-    def render(self, mode='human'):
-        if not hasattr(self, 'screen'):
+    def _render_frame(self):
+        if self._screen is None:
             pygame.init()
-            self.screen = pygame.display.set_mode((GRID_WIDTH * GRID_SIZE, GRID_HEIGHT * GRID_SIZE))
-            pygame.display.set_caption("Snake Agent")
-            self.clock = pygame.time.Clock()
+            if self.render_mode == "human":
+                self._screen = pygame.display.set_mode((WIN_W, WIN_H))
+                pygame.display.set_caption("Snake AI")
+            else:
+                self._screen = pygame.Surface((WIN_W, WIN_H))
+            self._clock = pygame.time.Clock()
+            self._font = pygame.font.SysFont("monospace", 22, bold=True)
 
-        self.screen.fill(WHITE)
+        surf = self._screen
+        surf.fill(_COLOR_BG)
 
-        for x, y in self.snake.body:
-            pygame.draw.rect(self.screen, GREEN, (x * GRID_SIZE, y * GRID_SIZE, GRID_SIZE, GRID_SIZE))
+        # Subtle grid lines
+        for x in range(0, WIN_W, CELL):
+            pygame.draw.line(surf, _COLOR_GRID, (x, 0), (x, GRID_H * CELL))
+        for y in range(0, GRID_H * CELL, CELL):
+            pygame.draw.line(surf, _COLOR_GRID, (0, y), (WIN_W, y))
 
-        food_x, food_y = self.food.position
-        pygame.draw.rect(self.screen, RED, (food_x * GRID_SIZE, food_y * GRID_SIZE, GRID_SIZE, GRID_SIZE))
+        # Food
+        fx, fy = self.game.food
+        if fx >= 0:
+            pygame.draw.ellipse(
+                surf, _COLOR_FOOD,
+                (fx * CELL + 3, fy * CELL + 3, CELL - 6, CELL - 6)
+            )
 
-        pygame.display.flip()
-        self.clock.tick(500)
-        pygame.time.delay(self.delay)
+        # Snake body (draw tail → head so head is on top)
+        for i, (sx, sy) in enumerate(reversed(self.game.snake)):
+            color = _COLOR_HEAD if i == len(self.game.snake) - 1 else _COLOR_BODY
+            pygame.draw.rect(surf, color, (sx * CELL + 1, sy * CELL + 1, CELL - 2, CELL - 2), border_radius=4)
 
-    def _get_observation(self):
-        observation = np.zeros((GRID_HEIGHT, GRID_WIDTH, 4), dtype=np.float32)
-        for y, row in enumerate(observation):
-            for x, _ in enumerate(row):
-                if (x, y) in self.snake.body:
-                    observation[y, x] = [1, 0, 0, 0]
-                elif (x, y) == self.food.position:
-                    observation[y, x] = [0, 1, 0, 0]
+        # Score bar
+        score_surf = self._font.render(
+            f"Score: {self.game.score}   Steps: {self.game.steps}", True, _COLOR_TEXT
+        )
+        surf.blit(score_surf, (8, GRID_H * CELL + 8))
 
-        head_x, head_y = self.snake.body[0]
-        food_x, food_y = self.food.position
-
-        # Add the relative position of the food to the observation
-        food_relative_x = food_x - head_x
-        food_relative_y = food_y - head_y
-
-        # Normalize the relative position
-        food_relative_x /= GRID_WIDTH
-        food_relative_y /= GRID_HEIGHT
-
-        # Add the relative position of the food to the observation (can replace channels 2 and 3)
-        observation[:, :, 2] = food_relative_x
-        observation[:, :, 3] = food_relative_y
-
-        return observation
-
-
-
-
-# Register the Snake environment
-gym.envs.registration.register(
-    id='Snake-v0',
-    entry_point='snake_env:SnakeEnv',
-)
-
+        if self.render_mode == "human":
+            pygame.event.pump()
+            pygame.display.flip()
+            self._clock.tick(self.metadata["render_fps"])
+        else:
+            return np.transpose(
+                np.array(pygame.surfarray.pixels3d(surf)), axes=(1, 0, 2)
+            )

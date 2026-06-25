@@ -1,5 +1,5 @@
-gym
-numpy
-pygame
-stable-baselines3
-matplotlib
+gymnasium>=0.29
+stable-baselines3>=2.3
+pygame>=2.5
+numpy>=1.24
+matplotlib>=3.7
